@@ -1,0 +1,12 @@
+services:
+  mysql:
+    container_name: mysql
+    privileged: true
+    image: mysql:8.4
+    ports:
+      - "3306:3306"
+    command: --max-connections=10000
+    environment:
+      - MYSQL_ROOT_PASSWORD=123456
+    volumes:
+      - /opt/docker/volumes/mysql:/var/lib/mysql

@@ -1,157 +1,87 @@
-#!/bin/bash
+check_log_errors() {
+    local log_file=$1  # 将第一个参数赋值给变量log_file，表示日志文件的路径
 
-# 函数：更新或追加键值对到.env文件
-update_or_append_to_env() {
-  local key=$1
-  local value=$2
-  local env_file=".env"
-
-  # 如果不存在.env文件，则创建
-  if [ ! -f "$env_file" ]; then
-    touch "$env_file"
-  fi
-
-  # 确保文件以换行符结束
-  sed -i'' -e '$a\' "$env_file"
-
-  # 检查键是否存在于.env文件中
-  if grep -q "^${key}=" "$env_file"; then
-    # 如果键存在，则更新它的值
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-      # macOS (BSD sed)
-      sed -i '' "/^${key}=/c\\
-${key}=${value}" "$env_file"
-    else
-      # Linux (GNU sed)
-      sed -i "/^${key}=/c\\${key}=${value}" "$env_file"
+    # 检查日志文件是否存在
+    if [[ ! -f "$log_file" ]]; then
+        echo "指定的日志文件不存在: $log_file"
+        return 1
     fi
-  else
-    # 如果键不存在，则追加键值对到文件
-    echo "${key}=${value}" >> "$env_file"
-  fi
 
-  # 再次确保文件以换行符结束
-  sed -i'' -e '$a\' "$env_file"
+    # 使用grep命令检查"core dumped"或"Error"的存在
+    # -C 5表示打印匹配行的前后各5行
+    local pattern="core dumped|Error|error"
+    if grep -E -C 5 "$pattern" "$log_file"; then
+        echo "检测到错误信息，请查看上面的输出。"
+        exit 1
+    else
+        echo "$log_file 中未检测到明确的错误信息。请手动排查 $log_file 以获取更多信息。"
+    fi
 }
 
+start_time=$(date +%s)  # 记录开始时间
 
-
-# 检测支持的 Docker Compose 命令
-if docker compose version &>/dev/null; then
-  DOCKER_COMPOSE_CMD="docker compose"
-elif docker-compose version &>/dev/null; then
-  DOCKER_COMPOSE_CMD="docker-compose"
-else
-  echo "无法找到 'docker compose' 或 'docker-compose' 命令。"
-  exit 1
+if [ -f "close.sh" ]; then
+    ./close.sh
 fi
 
-# 检查master分支是否有新代码
-# 定义颜色
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+export USER_IP=192.168.10.106
 
+mkdir -p ./logs/debug_logs/
 
-# 默认 device_id
-device_id="-1"
+# 8001
+python3 -u qanything_kernel/dependent_server/rerank_server/rerank_server.py > ./logs/debug_logs/rerank_server.log 2>&1 &
+PID1=$!
 
-usage() {
-    echo "Usage: $0 [-i <device_id>]"
-    echo " -i <device_id>: Specify GPU device_id"
-    exit 1
-}
+# 8002
+nohup python3 -u qanything_kernel/dependent_server/embedding_server/embedding_server.py > ./logs/debug_logs/embedding_server.log 2>&1 &
+PID2=$!
 
-while getopts "i:" opt; do
-    case $opt in
-        i) device_id=$OPTARG ;;
-        *) usage ;;
-    esac
+# 8003
+nohup python3 -u qanything_kernel/dependent_server/pdf_parser_server/pdf_parser_server.py > ./logs/debug_logs/pdf_parser_server.log 2>&1 &
+PID3=$!
+
+#8004
+nohup python3 -u qanything_kernel/dependent_server/ocr_server/ocr_server.py > ./logs/debug_logs/ocr_server.log 2>&1 &
+PID4=$!
+
+# 8110
+nohup python3 -u qanything_kernel/dependent_server/insert_files_serve/insert_files_server.py --port 8110 --workers 1 > ./logs/debug_logs/insert_files_server.log 2>&1 &
+PID5=$!
+
+#8777
+nohup python3 -u qanything_kernel/qanything_server/sanic_api.py --host $USER_IP --port 8777 --workers 1 > ./logs/debug_logs/main_server.log 2>&1 &
+PID6=$!
+
+# 生成close.sh脚本，写入kill命令
+echo "#!/bin/bash" > close.sh
+echo "kill $PID1 $PID2 $PID3 $PID4 $PID5 $PID6" > close.sh
+
+# 监听后端服务启动
+backend_start_time=$(date +%s)
+
+while ! grep -q "Starting worker" logs/debug_logs/main_server.log; do
+    echo "Waiting for the backend service to start..."
+    echo "等待启动后端服务"
+    sleep 1
+
+    # 获取当前时间并计算经过的时间
+    current_time=$(date +%s)
+    elapsed_time=$((current_time - backend_start_time))
+
+    # 检查是否超时
+    if [ $elapsed_time -ge 180 ]; then
+        echo "启动后端服务超时，自动检查日志文件 logs/debug_logs/main_server.log："
+        check_log_errors logs/debug_logs/main_server.log
+        exit 1
+    fi
+    sleep 5
 done
 
+current_time=$(date +%s)
+elapsed=$((current_time - start_time))  # 计算经过的时间（秒）
+echo "Time elapsed: ${elapsed} seconds."
+echo "已耗时: ${elapsed} 秒."
+user_ip=$USER_IP
+echo "请在[http://$user_ip:8777/qanything/]下访问前端服务来进行问答，如果前端报错，请在浏览器按F12以获取更多报错信息"
 
-# 检查device_id是否是0-9或-1
-if [[ ! $device_id =~ ^[0-9]|-1$ ]]; then
-    echo "device_id 必须是0-9或-1"
-    exit 1
-fi
-
-
-echo "device_id=${device_id}"
-
-# if device_id是-1，则提示在cpu上启动
-if [[ $device_id == "-1" ]]; then
-    echo "将在CPU上启动服务"
-else
-    echo "将在GPU $device_id 上启动服务"
-fi
-
-update_or_append_to_env "GPUID" "$device_id"
-
-# 读取环境变量中的用户信息
-source .env
-
-# 检查是否存在USER_IP
-if [ -z "${USER_IP}" ]; then
-    # 如果USER_IP不存在，询问用户并保存配置
-    read -p "Are you running the code on a remote server or on your local machine? (remote/local) 您是在云服务器上还是本地机器上启动代码？(remote/local) " answer
-    if [[ $answer == "local" || $answer == "本地" ]]; then
-        ip="localhost"
-    else
-        read -p "Please enter the server IP address 请输入服务器公网IP地址(示例：10.234.10.144): " ip
-        echo "当前设置的远程服务器IP地址为 $ip, QAnything启动后，本地前端服务位于（浏览器打开[http://$ip:8777/qanything/]），请知悉！"
-        sleep 5
-    fi
-
-    # 保存配置
-    update_or_append_to_env "USER_IP" "$ip"
-
-else
-    # 读取上次的配置
-    ip=$USER_IP
-    read -p "Do you want to use the previous ip: $ip? (yes/no) 是否使用上次的ip: $ip ？(yes/no) 回车默认选yes，请输入:" use_previous
-    use_previous=${use_previous:-yes}
-    if [[ $use_previous != "yes" && $use_previous != "是" ]]; then
-        read -p "Are you running the code on a remote server or on your local machine? (remote/local) 您是在远程服务器上还是本地机器上启动代码？(remote/local) " answer
-        if [[ $answer == "local" || $answer == "本地" ]]; then
-            ip="localhost"
-        else
-            read -p "Please enter the server IP address 请输入服务器公网IP地址(示例：10.234.10.144): " ip
-            echo "当前设置的远程服务器IP地址为 $ip, QAnything启动后，本地前端服务位于（浏览器打开[http://$ip:8777/qanything/]），请知悉！"
-            sleep 5
-        fi
-        # 保存新的配置
-        update_or_append_to_env "USER_IP" "$ip"
-    fi
-fi
-
-if [ -e /proc/version ]; then
-  if grep -qi microsoft /proc/version || grep -qi MINGW /proc/version; then
-    # 不支持Windows
-    echo "当前版本不支持Windows，请在Linux环境下运行此脚本"
-  else
-    echo "Running under native Linux"
-  if $DOCKER_COMPOSE_CMD -f docker-compose-linux.yaml down 2>&1 | tee /dev/tty | grep -q "services.qanything_local.deploy.resources.reservations value 'devices' does not match any of the regexes"; then
-    echo "检测到 Docker Compose 版本过低，请升级到v2.23.3或更高版本。执行docker-compose -v查看版本。"
-  fi
-
-    # 如果不存在volumes，则创建
-    if [ ! -d "volumes/es/data" ]; then
-        mkdir -p volumes/es/data
-        chmod 777 -R volumes/es/data
-    fi
-
-    $DOCKER_COMPOSE_CMD -f docker-compose-linux.yaml up -d
-    $DOCKER_COMPOSE_CMD -f docker-compose-linux.yaml logs -f qanything_local
-    # 检查日志输出
-  fi
-else
-  echo "Running under Macos"
-  if $DOCKER_COMPOSE_CMD -f docker-compose-mac.yaml down 2>&1 | tee /dev/tty | grep -q "services.qanything_local.deploy.resources.reservations value 'devices' does not match any of the regexes"; then
-    echo "检测到 Docker Compose 版本过低，请升级到v2.23.3或更高版本。执行docker-compose -v查看版本。"
-  fi
-
-  $DOCKER_COMPOSE_CMD -f docker-compose-mac.yaml up -d
-  $DOCKER_COMPOSE_CMD -f docker-compose-mac.yaml logs -f qanything_local
-fi
+tail -f -n 100 logs/debug_logs/debug.log

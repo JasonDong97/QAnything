@@ -642,4 +642,4 @@ async def ocr_api(request: Request):
 
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=7001, workers=args.workers)
+    app.run(host="0.0.0.0", port=8004, workers=args.workers)

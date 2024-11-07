@@ -53,4 +53,4 @@ async def pdf_parser(request: Request):
 
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=9009, workers=args.workers)
+    app.run(host="0.0.0.0", port=8003, workers=args.workers)
